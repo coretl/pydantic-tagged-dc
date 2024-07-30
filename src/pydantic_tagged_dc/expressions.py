@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import dataclasses
 from abc import abstractmethod
-from functools import partial
 from typing import (
     Annotated,
     Any,
     Generic,
-    Iterator,
     Literal,
     TypeVar,
     Union,
@@ -21,37 +19,37 @@ from pydantic.fields import FieldInfo
 
 T = TypeVar("T", int, float)
 
-# baseclass -> referring dataclass -> set of fields that refer to union of subclasses
-_baseclass_referrers: dict[type, dict[type, set[str]]] = {}
-# type adapters for each baseclass
-_typeadapters: dict[type, TypeAdapter] = {}
+
+class _TaggedUnion:
+    def __init__(self):
+        self._members: set[type] = set()
+        self._referrers: dict[type, set[str]] = {}
+        self.type_adapter = TypeAdapter(None)
+
+    def add_member(self, cls: type):
+        self._members.add(cls)
+        subclasses = tuple(Annotated[cls, Tag(cls.__name__)] for cls in self._members)
+        if len(subclasses) > 1:
+            print("Processing")
+            union = Union[subclasses]
+            for referrer, fields in self._referrers.items():
+                for field in dataclasses.fields(referrer):
+                    if field.name in fields:
+                        field.type = union
+                        field.default.discriminator = Discriminator(_get_type_field)
+                print("Referrer", referrer, fields)
+                rebuild_dataclass(referrer, force=True)
+            self.type_adapter = TypeAdapter(
+                Annotated[union, Discriminator(_get_type_field)]  # type: ignore
+            )
+
+    def add_referrer(self, cls: type, attr_name: str):
+        self._referrers.setdefault(cls, set()).add(attr_name)
 
 
-def discriminated_union_of_subclasses(cls):
-    _baseclass_referrers[cls] = {}
-    cls.__init_subclass__ = classmethod(partial(__init_subclass__, baseclass=cls))
-    return cls
-
-
-def _get_ultimate_origin(annotation):
-    typ = annotation
-    while get_origin(typ) is not None:
-        typ = get_origin(typ)
-    return typ
-
-
-def _recursive_subclasses(cls: type) -> Iterator[type]:
-    for subcls in cls.__subclasses__():
-        yield subcls
-        yield from _recursive_subclasses(subcls)
-
-
-def _make_tagged_union(baseclass: type):
-    subclasses = tuple(
-        Annotated[x, Tag(x.__name__)] for x in _recursive_subclasses(baseclass)
-    )
-    if len(subclasses) > 1:
-        return Union[subclasses]  # type: ignore
+def discriminated_union_baseclass(cls):
+    cls._tagged_union = _TaggedUnion()
+    return dataclass(cls)
 
 
 def _get_type_field(obj) -> str | None:
@@ -61,40 +59,46 @@ def _get_type_field(obj) -> str | None:
         return getattr(obj, "type", None)
 
 
-def __init_subclass__(cls, baseclass) -> None:
+def _get_tagged_union(cls: type) -> _TaggedUnion:
+    tu = getattr(cls, "_tagged_union", None)
+    if tu and isinstance(tu, _TaggedUnion):
+        return tu
+    else:
+        raise ValueError(
+            "Baseclass of {cls} not decorated with @discriminated_union_baseclass"
+        )
+
+
+def _get_ultimate_origin(annotation):
+    typ = annotation
+    while get_origin(typ) is not None:
+        typ = get_origin(typ)
+    return typ
+
+
+def discriminated_union_subclass(cls):
     # Add a discriminator field to the class so it can
     # be identified when deserailizing.
-    cls.__annotations__ = {
-        **cls.__annotations__,
-        "type": Literal[cls.__name__],  # type: ignore
-    }
+    cls.__annotations__["type"] = Literal[cls.__name__]  # type: ignore
     cls.type = Field(cls.__name__, repr=False)
-    # Rebuild any dataclass that references this union
-    union = _make_tagged_union(baseclass)
-    for referrer, fields in _baseclass_referrers[baseclass].items():
-        for field in dataclasses.fields(referrer):
-            if field.name in fields:
-                field.type = union
-        rebuild_dataclass(referrer, force=True)
-    # Add a cached TypeAdapter for deserialization
-    _typeadapters[baseclass] = TypeAdapter(
-        Annotated[union, Discriminator(_get_type_field)]  # type: ignore
-    )
     # Replace any bare annotation with a discriminated union of subclasses
+    # and register this class as one that refers to that union so it can be updated
     for k, v in get_type_hints(cls).items():
-        origin = _get_ultimate_origin(v)
-        if origin in _baseclass_referrers:
-            cls.__annotations__[k] = _make_tagged_union(origin)
-            field = getattr(cls, k, None)
-            assert isinstance(
-                field, FieldInfo
-            ), f"Expected {cls}.{k} to be a pydantic Field, got {type(field)}"
-            field.discriminator = Discriminator(_get_type_field)
-            _baseclass_referrers[origin].setdefault(cls, set()).add(k)
+        try:
+            field_tu = _get_tagged_union(_get_ultimate_origin(v))
+        except ValueError:
+            # It isn't a tagged union, nothing to do
+            pass
+        else:
+            field_tu.add_referrer(cls, k)
+    # Turn it into an actual dataclass
+    cls = dataclass(cls)
+    # Rebuild any dataclass (including this one) that references this union
+    _get_tagged_union(cls).add_member(cls)
+    return cls
 
 
-@discriminated_union_of_subclasses
-@dataclass
+@discriminated_union_baseclass
 class Expression(Generic[T]):
     @abstractmethod
     def calculate(self) -> T:
@@ -105,10 +109,10 @@ class Expression(Generic[T]):
 
     @classmethod
     def deserialize(cls, obj):
-        return _typeadapters[Expression].validate_python(obj)
+        return _get_tagged_union(cls).type_adapter.validate_python(obj)
 
 
-@dataclass
+@discriminated_union_subclass
 class Value(Expression[T]):
     value: T = Field(description="Fixed value")
 
@@ -116,16 +120,7 @@ class Value(Expression[T]):
         return self.value
 
 
-@dataclass
-class Subtract(Expression[T]):
-    left: Expression[T] = Field(description="Left hand value of the expression")
-    right: Expression[T] = Field(description="Right hand value of the expression")
-
-    def calculate(self) -> T:
-        return self.left.calculate() - self.right.calculate()
-
-
-@dataclass
+@discriminated_union_subclass
 class Multiply(Expression[T]):
     left: Expression[T] = Field(description="Left hand value of the expression")
     right: Expression[T] = Field(description="Right hand value of the expression")
@@ -134,7 +129,16 @@ class Multiply(Expression[T]):
         return self.left.calculate() * self.right.calculate()
 
 
-@dataclass
+@discriminated_union_subclass
+class Subtract(Expression[T]):
+    left: Expression[T] = Field(description="Left hand value of the expression")
+    right: Expression[T] = Field(description="Right hand value of the expression")
+
+    def calculate(self) -> T:
+        return self.left.calculate() - self.right.calculate()
+
+
+@discriminated_union_subclass
 class Add(Expression[T]):
     left: Expression[T] = Field(description="Left hand value of the expression")
     right: Expression[T] = Field(description="Right hand value of the expression")
