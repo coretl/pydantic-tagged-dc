@@ -1,0 +1,10 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: pydantic-tagged-dc
+  title: pydantic-tagged-dc
+  description: Pydantic tagged union in dataclasses
+spec:
+  type: documentation
+  lifecycle: experimental
+  owner: group:default/sscc

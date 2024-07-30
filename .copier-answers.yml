@@ -1,0 +1,16 @@
+# Changes here will be overwritten by Copier
+_commit: 2.1.0
+_src_path: gh:DiamondLightSource/python-copier-template
+author_email: tom.cobb@diamond.ac.uk
+author_name: Tom Cobb
+component_owner: group:default/sscc
+description: Pydantic tagged union in dataclasses
+distribution_name: pydantic-tagged-dc
+docker: false
+docs_type: README
+git_platform: github.com
+github_org: coretl
+package_name: pydantic_tagged_dc
+pypi: true
+repo_name: pydantic-tagged-dc
+type_checker: pyright
