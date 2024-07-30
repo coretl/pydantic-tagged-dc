@@ -19,10 +19,12 @@ from pydantic import Discriminator, Field, RootModel, Tag, TypeAdapter
 from pydantic.dataclasses import dataclass, rebuild_dataclass
 from pydantic.fields import FieldInfo
 
-T = TypeVar("T")
+T = TypeVar("T", int, float)
 
 # baseclass -> referring dataclass -> set of fields that refer to union of subclasses
 _baseclass_referrers: dict[type, dict[type, set[str]]] = {}
+# type adapters for each baseclass
+_typeadapters: dict[type, TypeAdapter] = {}
 
 
 def discriminated_union_of_subclasses(cls):
@@ -31,14 +33,14 @@ def discriminated_union_of_subclasses(cls):
     return cls
 
 
-def _get_ultimate_origin(annotation: type) -> type:
+def _get_ultimate_origin(annotation):
     typ = annotation
     while get_origin(typ) is not None:
         typ = get_origin(typ)
     return typ
 
 
-def _recursive_subclasses(cls: type[T]) -> Iterator[type[T]]:
+def _recursive_subclasses(cls: type) -> Iterator[type]:
     for subcls in cls.__subclasses__():
         yield subcls
         yield from _recursive_subclasses(subcls)
@@ -49,10 +51,10 @@ def _make_tagged_union(baseclass: type):
         Annotated[x, Tag(x.__name__)] for x in _recursive_subclasses(baseclass)
     )
     if len(subclasses) > 1:
-        return Union[subclasses]
+        return Union[subclasses]  # type: ignore
 
 
-def _get_type_field(obj) -> str:
+def _get_type_field(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("type")
     else:
@@ -74,6 +76,10 @@ def __init_subclass__(cls, baseclass) -> None:
             if field.name in fields:
                 field.type = union
         rebuild_dataclass(referrer, force=True)
+    # Add a cached TypeAdapter for deserialization
+    _typeadapters[baseclass] = TypeAdapter(
+        Annotated[union, Discriminator(_get_type_field)]  # type: ignore
+    )
     # Replace any bare annotation with a discriminated union of subclasses
     for k, v in get_type_hints(cls).items():
         origin = _get_ultimate_origin(v)
@@ -95,19 +101,11 @@ class Expression(Generic[T]):
         raise NotImplementedError(self)
 
     def serialize(self) -> dict[str, Any]:
-        rm = RootModel(self)
-        return rm.model_dump()
+        return RootModel(self).model_dump()
 
     @classmethod
     def deserialize(cls, obj):
-        """Deserialize the spec from a dictionary."""
-        validator = TypeAdapter(
-            Annotated[
-                _make_tagged_union(Expression),
-                Discriminator(_get_type_field),
-            ]
-        )
-        return validator.validate_python(obj)
+        return _typeadapters[Expression].validate_python(obj)
 
 
 @dataclass
@@ -134,15 +132,6 @@ class Multiply(Expression[T]):
 
     def calculate(self) -> T:
         return self.left.calculate() * self.right.calculate()
-
-
-@dataclass
-class Divide(Expression[T]):
-    left: Expression[T] = Field(description="Left hand value of the expression")
-    right: Expression[T] = Field(description="Right hand value of the expression")
-
-    def calculate(self) -> T:
-        return self.left.calculate() / self.right.calculate()
 
 
 @dataclass
