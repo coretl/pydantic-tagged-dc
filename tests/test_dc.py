@@ -1,11 +1,11 @@
 from pytest import fixture
 
-from pydantic_tagged_dc.expressions import Add, Expression, Value
+from pydantic_tagged_dc.expressions import Add, Expression, Subtract, Value
 
 
 @fixture
 def expression():
-    yield Add(Add(Value(2), Value(4)), Value(3))
+    yield Subtract(Add(Value(2), Value(4)), Value(3))
 
 
 @fixture
@@ -18,7 +18,7 @@ def serialized():
                 "type": "Add",
             },
             "right": {"value": 3, "type": "Value"},
-            "type": "Add",
+            "type": "Subtract",
         }
     )
 
@@ -33,6 +33,11 @@ def test_deserialize(expression: Expression, serialized: dict):
 
 def test_render(expression: Expression):
     assert (
-        str(expression) == "Add(left=Add(left=Value(value=2), right=Value(value=4)),"
+        str(expression)
+        == "Subtract(left=Add(left=Value(value=2), right=Value(value=4)),"
         " right=Value(value=3))"
     )
+
+
+def test_calculate(expression: Expression):
+    assert expression.calculate() == 3
