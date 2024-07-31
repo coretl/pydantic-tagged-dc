@@ -37,3 +37,7 @@ def test_render(expression: Expression):
         == "Subtract(left=Add(left=Value(value=2), right=Value(value=4)),"
         " right=Value(value=3))"
     )
+
+
+def test_calculate(expression: Expression):
+    assert expression.calculate() == 3
