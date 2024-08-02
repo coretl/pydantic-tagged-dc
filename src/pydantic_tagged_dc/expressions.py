@@ -3,9 +3,18 @@ from __future__ import annotations
 import dataclasses
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Generic, Literal, TypeVar, Union, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    TypeVar,
+    Union,
+    get_origin,
+    get_type_hints,
+)
 
-from pydantic import Field, GetCoreSchemaHandler, RootModel, TypeAdapter
+from pydantic import Discriminator, Field, GetCoreSchemaHandler, RootModel, TypeAdapter
 from pydantic.dataclasses import dataclass, rebuild_dataclass
 from pydantic.fields import FieldInfo
 
@@ -53,7 +62,7 @@ class _TaggedUnion:
                         self._set_discriminator(referrer, field.name, field.default)
                 rebuild_dataclass(referrer, force=True)
             # Make a type adapter for use in deserialization
-            self.type_adapter = TypeAdapter(union)
+            self.type_adapter = TypeAdapter(Annotated[union, Discriminator("type")])  # type: ignore
 
     def add_referrer(self, cls: type, attr_name: str):
         self._referrers.setdefault(cls, set()).add(attr_name)
