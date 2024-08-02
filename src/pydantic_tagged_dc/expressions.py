@@ -14,14 +14,7 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import (
-    Discriminator,
-    Field,
-    GetCoreSchemaHandler,
-    RootModel,
-    Tag,
-    TypeAdapter,
-)
+from pydantic import Discriminator, Field, GetCoreSchemaHandler, RootModel, TypeAdapter
 from pydantic.dataclasses import dataclass, rebuild_dataclass
 from pydantic.fields import FieldInfo
 
@@ -30,42 +23,57 @@ T = TypeVar("T", int, float)
 
 class _TaggedUnion:
     def __init__(self):
+        # The members of the tagged union, i.e. subclasses of the baseclasses
         self._members: set[type] = set()
+        # Classes and their field names that refer to this tagged union
         self._referrers: dict[type, set[str]] = {}
         self.type_adapter = TypeAdapter(None)
 
+    def _make_union(self):
+        # Make a union of members
+        # https://docs.pydantic.dev/2.8/concepts/unions/#discriminated-unions-with-str-discriminators
+        if len(self._members) > 1:
+            # Unions are only valid with more than 1 member
+            return Union[tuple(self._members)]  # type: ignore
+
+    def _set_discriminator(self, cls: type, field_name: str, field: Any):
+        # Set the field to use the `type` discriminator on deserialize
+        # https://docs.pydantic.dev/2.8/concepts/unions/#discriminated-unions-with-str-discriminators
+        assert isinstance(
+            field, FieldInfo
+        ), f"Expected {cls.__name__}.{field_name} to be a Pydantic field, not {field!r}"
+        field.discriminator = "type"
+
     def add_member(self, cls: type):
         if cls in self._members:
+            # A side effect of hooking to __get_pydantic_core_schema__ is that it is
+            # called muliple times for the same member, do no process if it wouldn't
+            # change the member list
             return
         self._members.add(cls)
-        subclasses = tuple(Annotated[cls, Tag(cls.__name__)] for cls in self._members)
-        if len(subclasses) > 1:
-            union = Union[subclasses]  # type: ignore
-            # Rebuild in reverse order as we need to rebuild the last added
-            # class first so earlier refs will get it
-            for referrer, fields in reversed(self._referrers.items()):
+        union = self._make_union()
+        if union:
+            # There are more than 1 subclasses in the union, so set all the referrers
+            # to use this union
+            for referrer, fields in self._referrers.items():
                 for field in dataclasses.fields(referrer):
                     if field.name in fields:
                         field.type = union
-                        assert isinstance(field.default, FieldInfo), (
-                            f"Expected {referrer}.{field.name} to be a Pydantic field,"
-                            " not {field.default!r}"
-                        )
-                        field.default.discriminator = Discriminator(_get_type_field)
+                        self._set_discriminator(referrer, field.name, field.default)
                 rebuild_dataclass(referrer, force=True)
-            self.type_adapter = TypeAdapter(
-                Annotated[union, Discriminator(_get_type_field)]  # type: ignore
-            )
+            # Make a type adapter for use in deserialization
+            self.type_adapter = TypeAdapter(Annotated[union, Discriminator("type")])  # type: ignore
 
     def add_referrer(self, cls: type, attr_name: str):
         self._referrers.setdefault(cls, set()).add(attr_name)
-
-
-def _get_type_field(obj) -> str | None:
-    if isinstance(obj, dict):
-        return obj.get("type")
-    else:
-        return getattr(obj, "type", None)
+        union = self._make_union()
+        if union:
+            # There are more than 1 subclasses in the union, so set the referrer
+            # (which is currently being constructed) to use it
+            # note that we use annotations as the class has not been turned into
+            # a dataclass yet
+            cls.__annotations__[attr_name] = union
+            self._set_discriminator(cls, attr_name, getattr(cls, attr_name, None))
 
 
 _tagged_unions: dict[type, _TaggedUnion] = {}
